@@ -20,6 +20,8 @@ import datetime
 import json
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
@@ -34,13 +36,25 @@ BSE_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/MktHighLowDataNew/w"
     "?scripcode=&HLflag=H&Grpcode=&indexcode=&EQflag=1"
 )
+# BSE sits behind Akamai bot protection. A bare User-Agent/Accept/Referer
+# set gets a 403 from datacenter/CI IPs; this fuller browser-like header
+# set (matching what a real Chrome request sends) is what got a 200 in
+# testing. Keep all of these - trimming them reintroduces the 403.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.bseindia.com/markets/equity/EQReports/HighLow?Flag=H",
+    "Origin": "https://www.bseindia.com",
+    "sec-ch-ua": '"Chromium";v="120", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-site": "same-site",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
 }
 DAILY_LOG_HEADER = [
     "Date", "SecurityCode", "SecurityName", "LTP", "52WeekHigh",
@@ -52,10 +66,19 @@ TRACKER_HEADER = [
 ]
 
 
-def fetch_data():
-    req = urllib.request.Request(BSE_URL, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)["Table"]
+def fetch_data(retries=3, backoff=5):
+    last_err = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(BSE_URL, headers=HEADERS)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)["Table"]
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            last_err = e
+            print(f"Fetch attempt {attempt}/{retries} failed: {e}", file=sys.stderr)
+            if attempt < retries:
+                time.sleep(backoff)
+    raise last_err
 
 
 def fmt_date(dt_str):
