@@ -128,7 +128,7 @@ def recompute_tracker(daily_rows):
             code, name, total, first_seen, last_seen, days_since, new_today,
             entries_sorted[-1][3], entries_sorted[-1][4],
         ])
-    tracker_rows.sort(key=lambda r: str(r[0]))
+    tracker_rows.sort(key=lambda r: str(r[1]).upper())
     return tracker_rows
 
 
