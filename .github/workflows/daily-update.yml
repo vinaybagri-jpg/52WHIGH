@@ -1,0 +1,38 @@
+name: Daily BSE 52-Week High Update
+
+on:
+  schedule:
+    # 11:30 UTC = 17:00 IST, ~90 min after BSE close; and a 13:30 UTC
+    # retry in case the BSE API hadn't finalized the day's data yet.
+    # The script is idempotent, so a second run on the same day is a no-op.
+    - cron: '30 11 * * 1-5'
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install openpyxl
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run daily update
+        run: python3 daily_update.py
