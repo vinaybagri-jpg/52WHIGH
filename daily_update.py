@@ -14,6 +14,12 @@ Usage:
 Idempotent: if today's BSE report date is already the last date in
 daily_log.csv, the script exits without changing or committing anything.
 Safe to run multiple times a day (e.g. hourly in a market-close window).
+
+daily_log.csv and symbol_tracker.csv stay flat (one row per appearance /
+one summary row per symbol) - they're the raw data. The xlsx's Daily_Log
+tab is a presentation view: one row per company, never repeated, with a
+52WHighCount column and one column per trading date holding the price on
+the days that company hit a new 52-week high (blank otherwise).
 """
 import csv
 import datetime
@@ -128,52 +134,116 @@ def recompute_tracker(daily_rows):
 
 def build_xlsx(daily_rows, tracker_rows, report_date):
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
 
-    total_log_entries = len(daily_rows)
+    trading_dates = sorted(set(r[0] for r in daily_rows))
+    date_objs = [datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in trading_dates]
+
+    rate_by_code_date = {}
+    latest_row_by_code = {}
+    for r in daily_rows:
+        d, code = r[0], str(r[1])
+        rate_by_code_date.setdefault(code, {})[d] = float(r[4])
+        latest_row_by_code[code] = r  # rows accumulate in ascending date order
+
     unique_symbols = len(tracker_rows)
-    symbols_new_today = sum(1 for r in tracker_rows if r[6] == "Yes")
+    total_events = sum(t[2] for t in tracker_rows)
+    new_on_latest = sum(1 for t in tracker_rows if t[3] == trading_dates[-1])
 
     wb = Workbook()
+
     ws = wb.active
     ws.title = "Dashboard"
     ws["A1"] = "BSE 52-Week High Tracker - Dashboard"
     ws["A1"].font = Font(name="Arial", size=14, bold=True)
     labels = [
-        ("Latest Log Date", report_date),
-        ("Total Log Entries", total_log_entries),
-        ("Unique Symbols", unique_symbols),
-        ("Symbols New Today", symbols_new_today),
+        ("Latest Trading Date", date_objs[-1].strftime("%d %b %Y")),
+        ("Unique Symbols Tracked", unique_symbols),
+        ("Total 52-Week-High Events", total_events),
+        ("New Symbols on Latest Date", new_on_latest),
+        ("Trading Dates Logged", len(trading_dates)),
     ]
     for i, (label, value) in enumerate(labels, start=3):
         ws.cell(row=i, column=1, value=label).font = Font(name="Arial", bold=True)
         ws.cell(row=i, column=2, value=value).font = Font(name="Arial")
-    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["A"].width = 26
     ws.column_dimensions["B"].width = 18
 
     ws2 = wb.create_sheet("Daily_Log")
+    header_font = Font(name="Arial", bold=True, color="0000FF")
     blue_font = Font(name="Arial", color="0000FF")
-    for c, h in enumerate(DAILY_LOG_HEADER, start=1):
-        ws2.cell(row=1, column=c, value=h).font = Font(name="Arial", bold=True, color="0000FF")
-    numeric_cols = {4, 5, 6, 8}
-    for r_idx, row in enumerate(daily_rows, start=2):
-        for c_idx, val in enumerate(row, start=1):
-            cell = ws2.cell(row=r_idx, column=c_idx)
-            if c_idx == 1:
-                try:
-                    cell.value = datetime.datetime.strptime(val, "%Y-%m-%d").date()
-                    cell.number_format = "yyyy-mm-dd"
-                except ValueError:
-                    cell.value = val
-            elif c_idx in numeric_cols:
-                cell.value = float(val) if val != "" else None
-                if val != "":
-                    cell.number_format = "#,##0.00"
-            else:
-                cell.value = val
+    center = Alignment(horizontal="center")
+
+    fixed_headers = ["SecurityCode", "SecurityName", "52WHighCount", "FirstHitDate", "LastHitDate"]
+    tail_headers = ["LatestLTP", "Latest52WHigh", "AllTimeHighPrice", "AllTimeHighDate"]
+    date_col_start = len(fixed_headers) + 1
+    tail_col_start = date_col_start + len(trading_dates)
+
+    col = 1
+    for h in fixed_headers:
+        ws2.cell(row=1, column=col, value=h).font = header_font
+        col += 1
+    for d in date_objs:
+        c = ws2.cell(row=1, column=col, value=d)
+        c.font = header_font
+        c.number_format = "dd mmm yyyy"
+        c.alignment = center
+        col += 1
+    for h in tail_headers:
+        ws2.cell(row=1, column=col, value=h).font = header_font
+        col += 1
+
+    for r_idx, t in enumerate(tracker_rows, start=2):
+        code, name, total, first_seen, last_seen, _days_since, _new_today, ltp, wh = t
+        ws2.cell(row=r_idx, column=1, value=code).font = blue_font
+        ws2.cell(row=r_idx, column=2, value=name).font = blue_font
+        cnt = ws2.cell(row=r_idx, column=3, value=total)
+        cnt.font = blue_font
+        cnt.alignment = center
+        fd = ws2.cell(row=r_idx, column=4, value=datetime.datetime.strptime(first_seen, "%Y-%m-%d").date())
+        fd.number_format = "dd mmm yyyy"
+        fd.font = blue_font
+        ld = ws2.cell(row=r_idx, column=5, value=datetime.datetime.strptime(last_seen, "%Y-%m-%d").date())
+        ld.number_format = "dd mmm yyyy"
+        ld.font = blue_font
+
+        rbd = rate_by_code_date.get(code, {})
+        for d_idx, d_str in enumerate(trading_dates):
+            cell = ws2.cell(row=r_idx, column=date_col_start + d_idx)
+            if d_str in rbd:
+                cell.value = rbd[d_str]
+                cell.number_format = "#,##0.00"
             cell.font = blue_font
-    for c in range(1, len(DAILY_LOG_HEADER) + 1):
-        ws2.column_dimensions[ws2.cell(row=1, column=c).column_letter].width = 16
+            cell.alignment = center
+
+        tc = tail_col_start
+        v = ws2.cell(row=r_idx, column=tc, value=float(ltp))
+        v.number_format = "#,##0.00"
+        v.font = blue_font
+        v = ws2.cell(row=r_idx, column=tc + 1, value=float(wh))
+        v.number_format = "#,##0.00"
+        v.font = blue_font
+        latest_row = latest_row_by_code.get(code)
+        if latest_row is not None:
+            ath, ath_date = latest_row[7], latest_row[8]
+            if ath not in ("", None):
+                v = ws2.cell(row=r_idx, column=tc + 2, value=float(ath))
+                v.number_format = "#,##0.00"
+                v.font = blue_font
+            v = ws2.cell(row=r_idx, column=tc + 3, value=ath_date or None)
+            v.font = blue_font
+
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 16
+    ws2.column_dimensions["C"].width = 13
+    ws2.column_dimensions["D"].width = 13
+    ws2.column_dimensions["E"].width = 13
+    for d_idx in range(len(trading_dates)):
+        ws2.column_dimensions[get_column_letter(date_col_start + d_idx)].width = 13
+    for i in range(len(tail_headers)):
+        ws2.column_dimensions[get_column_letter(tail_col_start + i)].width = 16
+    ws2.freeze_panes = "F2"
 
     ws3 = wb.create_sheet("Symbol_Tracker")
     black_font = Font(name="Arial", color="000000")
